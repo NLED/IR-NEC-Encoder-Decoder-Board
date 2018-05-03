@@ -25,7 +25,7 @@ Commercial licenses versions are available for a donation of any amount. Contact
 ================================================================================================================
 
 Ready-made devices are available for purchase, and large batch manufacturing of any device can be requested.
-Please see the webpage www.NLEDShop.com/pixelproducts
+Please see the webpage www.NLEDShop.com/addoncards
 
 NLED is available for custom design and manufacturing, please contact via phone or email to discuss your project.
 
