@@ -1,0 +1,288 @@
+/*******************************************************************************                                        
+;                                                                              
+;    SOFTWARE IS PROVIDED "AS IS".  Northern Lights Electronic Design, LLC AND ITS LICENSORS EXPRESSLY      
+;    DISCLAIM ANY WARRANTY OF ANY KIND, WHETHER EXPRESS OR IMPLIED, INCLUDING  
+;    BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS    
+;    FOR A PARTICULAR PURPOSE, OR NON-INFRINGEMENT. IN NO EVENT SHALL          
+;    Northern Lights Electronic Design, LLC OR ITS LICENSORS BE LIABLE FOR ANY INCIDENTAL, SPECIAL,         
+;    INDIRECT OR CONSEQUENTIAL DAMAGES, LOST PROFITS OR LOST DATA, HARM TO     
+;    YOUR EQUIPMENT, COST OF PROCUREMENT OF SUBSTITUTE GOODS, TECHNOLOGY OR    
+;    SERVICES, ANY CLAIMS BY THIRD PARTIES (INCLUDING BUT NOT LIMITED TO ANY   
+;    DEFENSE THEREOF), ANY CLAIMS FOR INDEMNITY OR CONTRIBUTION, OR OTHER      
+;    SIMILAR COSTS.                                                            
+;                                                                              
+;    To the fullest extend allowed by law, Northern Lights Electronic Design, LLC and its licensors         
+;    liability shall not exceed the amount of fee, if any, that you have paid directly to NLED to use this software.
+;                                                                              
+;    Northern Lights Electronic Design, LLC PROVIDES THIS SOFTWARE CONDITIONALLY UPON YOUR ACCEPTANCE OF
+;    THESE TERMS.                                                              
+;                                                                              
+; Original Author: Jeffrey Nygaard
+; Company: Northern Lights Electronic Design, LLC
+; Contact: JNygaard@NLEDShop.com
+; Date Updated: May  5, 2018
+; Webpage: www.NLEDShop.com
+; Title: NLED Modulated NEC Infrared Decoder and Encoder
+
+
+This is the code that NLED Aurora based devices use to interface with the Infrared decoder board.
+The function InfraRedCommand() executes the commands, the switch() cases can be altered to user defined code.
+
+This is not Arduino code, but can be ported. 
+Written for XC16 on 24F but it can easily be ported to other languages and devices.
+
+*/
+
+//===================================================================================
+
+//Defines for the controllers used by NLED, its a 24 key version. Change the values for other remotes.
+
+#define cIRRemoteAdrHI 0xEF
+#define cIRRemoteAdrLo 0x00
+#define cIRRemoteMaxButtons 24
+
+//===================================================================================
+
+//UART Interrupt handler for a recieved byte
+void __attribute__((__interrupt__, no_auto_psv)) _U2RXInterrupt(void)
+{
+    //  U2TXREG = U2RXREG;
+    InfraRedReception(U2RXREG); //call function so can be called from other places
+    IFS1bits.U2RXIF = 0; //clear RX interrupt flag - do I want to do this? could miss a byte
+}
+
+//===================================================================================
+
+//Actual function that checks for the correct byte order
+void InfraRedReception(unsigned char tempRXByte)
+{
+    //;Code Reception UART Output: 255 -> 254 -> AdrMSB -> AdrLSB -> Key Number
+    //Example: AddressLow - 0x00, AddressHi - 0xEF, KeyID#4(key IDnumbers start at 0)
+    //       255 -> 254 -> 239(0xEF) -> 0(0x00) -> 4
+    //  Repeat: 250 -> 253, repeats while key is held   
+
+    switch (IRReceptionState)
+    {
+    case 0:
+        if (tempRXByte == 255) IRReceptionState++;
+        break;
+    case 1:
+        if (tempRXByte == 254) IRReceptionState++;
+        else IRReceptionState = 0;
+        break;
+    case 2:
+        if (tempRXByte == cIRRemoteAdrHI) IRReceptionState++;
+        else IRReceptionState = 0;
+        break;
+    case 3:
+        if (tempRXByte == cIRRemoteAdrLo) IRReceptionState++;
+        else IRReceptionState = 0;
+        break;
+    case 4:
+        if (tempRXByte < cIRRemoteMaxButtons) //24 is the maximum amount of keys mapped, ID#s 0 - 23
+        {
+            InfraRedCommand(tempRXByte); //run command
+            IRReceptionState++; //wait for repeat
+        }
+        break;
+    case 5:
+        if (tempRXByte == 250) IRReceptionState++; //repeat packet
+        else if (tempRXByte == 255) IRReceptionState = 1; //next packet is coming in maybe
+        else IRReceptionState = 0; //else resetart process
+        break;
+    case 6:
+        if (tempRXByte == 253)
+        {
+            //repeat packet confirmed   
+            InfraRedCommand(IRReceptionCMD); //run command
+            IRReceptionState = 5; //set to state 5, waiting for additional repeat packets
+        }
+        else IRReceptionState = 0; //else its lost, restart
+        break;
+    } //end switch
+} //end InfraRedReception()
+
+//===================================================================================
+
+//Function that executes a command after its validated.
+void InfraRedCommand(unsigned char passedID)
+{
+    //Called after receiveing a verified NEC packet, or repeat packet
+    //this maps the passedID# which is the key value to a command.
+    //Maps 24-key Chinese IR remote, ID#s 0 - 23
+    IRReceptionCMD = passedID; //store in case of repeat packet
+
+    switch (passedID)
+    {
+    case 0: //on/off
+
+        //how to know?
+        if (DeviceForceOff == 0)
+        {
+            DevicePaused = 1; //puase device so it keeps the cleared channel values
+            DeviceForceOff = 1; // set flag to indicate
+            ClearUnusedChannels(0);
+            PackTheData = 1;
+        }
+        else
+        {
+            //device is forced off  - turn back on, have to restart sequence since CHannelValues was lost
+            DeviceForceOff = 0;
+            #if defined(mSelect)
+            if (SequenceMode == mSelect) InitColorSelect();
+            else SetChangeFlag(); //restart current sequence
+            #else
+             SetChangeFlag(); //restart current sequence
+            #endif          
+        }
+
+        IRReceptionState = 0; //Disable Repeat Commands
+        break;
+    case 1: //Adjustment Back
+        //either sequence# adjust or value adjust for color select, etc
+        #if defined(mSelect)
+        if (SequenceMode == mSelect)
+        {
+            if (ChannelValues[ManualColorVar] > 1024) ChannelValues[ManualColorVar] -= 1024;
+            else ChannelValues[ManualColorVar] = 0;
+            PackTheData = 1;
+        }
+        else
+        {
+            DecrementSequenceNumber();
+            IRReceptionState = 0; //Disable Repeat Commands
+        }
+        #else
+        DecrementSequenceNumber();
+        IRReceptionState = 0; //Disable Repeat Commands
+        #endif
+        break;
+    case 2: //Play / Pause
+        DevicePaused = !DevicePaused; //play / pause
+        IRReceptionState = 0; //Disable Repeat Commands
+        break;
+    case 3: //Adjustment Forward
+        #if defined(mSelect)
+        if (SequenceMode == mSelect)
+        {
+            if (ChannelValues[ManualColorVar] < 0xFBFF) ChannelValues[ManualColorVar] += 1024;
+            else ChannelValues[ManualColorVar] = 0xFFFF;
+            PackTheData = 1;
+        }
+        else
+        {
+            IncrementSequenceNumber();
+            IRReceptionState = 0; //Disable Repeat Commands
+        }
+        #else
+        IncrementSequenceNumber();
+        IRReceptionState = 0; //Disable Repeat Commands
+        #endif
+        break;
+        #if defined(mSelect)  
+    case 4: //Red Select
+        ManualColorVar = 0;
+        break;
+    case 5: //Green Select
+        ManualColorVar = 1;
+        break;
+    case 6: //Blue Select
+        ManualColorVar = 2;
+        break;
+    case 7: //White Select
+        ManualColorVar = 3;
+        break;
+        #endif    
+    case 8: //Brightness Up
+        if (GlobalUserDimValue < 255)
+        {
+            Buffer2 = 0; //no save
+            GlobalUserDimValue += 16; //was written for 16-bit lamp, but works on ion/electron
+            Buffer3 = GlobalUserDimValue;
+            ExecuteCommandByID(15);
+        }
+        break;
+    case 9: //Speed Increase - Make it faster
+        Buffer3 = 0; //makes it increment  by 1      
+        ExecuteCommandByID(71);
+        break;
+    case 10: //Enter Sequence Mode
+        #if defined(mSelect)
+        if (SequenceMode == mSelect)
+        {
+            ExecuteEESave = 1; //save from program loop right away, no timer
+            EEPROMSaveType = 200; //Save Color Select Values only
+        }
+        #endif    
+        IRReceptionState = 0; //Disable Repeat Commands
+        HWPVSequence = 0;
+        if (SelectedSequence == UserIdleSequenceNum) SelectedSequence = HoldSelectedSequence; //restore if idling
+        SetChangeFlag(); //has to restart the sequence since its ChannelValues were cleared
+        break;
+    case 11: //Enter Color Select
+        #if defined(mSelect)
+        if (SequenceMode != mSelect) InitColorSelect();
+        #endif
+        IRReceptionState = 0; //Disable Repeat Commands
+        break;
+    case 12: //Brightness Down
+        if (GlobalUserDimValue > 15)
+        {
+            Buffer2 = 0; //no save        
+            GlobalUserDimValue -= 16; //32 steps
+            Buffer3 = GlobalUserDimValue;
+            ExecuteCommandByID(15);
+        }
+        break;
+    case 13: //Speed Decrease - Make it slower
+        Buffer3 = 0; //makes it decrement  by 1
+        ExecuteCommandByID(72);
+        break;
+    case 14: //Start Idle Sequence
+        #if defined(mSelect)
+        if (SequenceMode == mSelect)
+        {
+            ExecuteEESave = 1; //save from program loop right away, no timer
+            EEPROMSaveType = 200; //Save Color Select Values only
+        }
+        #endif     
+        IRReceptionState = 0; //Disable Repeat Commands
+        HWPVSequence = 0;
+        HoldSelectedSequence = SelectedSequence; //save so current sequence can be restored after movement
+        SelectedSequence = UserIdleSequenceNum;
+        SetChangeFlag(); //has to restart the sequence since its ChannelValues were cleared
+        break;
+    case 15: //Reset Color Select
+        #if defined(mSelect)
+        if (SequenceMode == mSelect)
+        {
+            ChannelValues[0] = 0x0000;
+            ChannelValues[1] = 0x0000;
+            ChannelValues[2] = 0x0000;
+            ChannelValues[3] = 0x0000;
+            PackTheData = 1;
+        }
+        #endif
+        IRReceptionState = 0; //Disable Repeat Commands
+        break;
+    case 16: //Start Sequence by ID Number
+    case 17:
+    case 18:
+    case 19:
+    case 20:
+    case 21:
+    case 22:
+    case 23:
+        IRReceptionState = 0; //Disable Repeat Commands
+        Buffer2 = 0; //sequence mode, 1 = idle
+        Buffer3 = passedID - 16; //16 is the starting key ID#, creates value 0 - 7
+        ExecuteCommandByID(90); //Select Sequence By ID
+        break;
+    default:
+        //Unkown Command ID
+        //Do nothing
+        break;
+    } //end switch
+} //end func
+
+//===================================================================================
